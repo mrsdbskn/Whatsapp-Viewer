@@ -10,10 +10,11 @@ export async function getSqlEngine() {
   if (sqlEngineInstance) return sqlEngineInstance;
 
   // Support Node.js testing environment
-  if (typeof process !== 'undefined' && process.versions && process.versions.node && typeof window === 'undefined') {
+  if (typeof process !== 'undefined' && process.versions && process.versions?.node && typeof window === 'undefined') {
     try {
-      const fs = await import('fs');
-      const path = await import('path');
+      const dynamicImport = new Function('m', 'return import(m)');
+      const fs = await dynamicImport('fs');
+      const path = await dynamicImport('path');
       const wasmPath = path.resolve('node_modules/sql.js/dist/sql-wasm.wasm');
       if (fs.existsSync(wasmPath)) {
         const wasmBinary = fs.readFileSync(wasmPath);

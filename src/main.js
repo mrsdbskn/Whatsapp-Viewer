@@ -11,4 +11,10 @@ if ('serviceWorker' in navigator && window.location.protocol.startsWith('http'))
   });
 }
 
-createApp(App).mount('#app');
+const app = createApp(App);
+
+app.config.errorHandler = (err, instance, info) => {
+  console.error('Vue runtime error:', err, info);
+};
+
+app.mount('#app');

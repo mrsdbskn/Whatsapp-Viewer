@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue';
 import { 
   MessageSquare, ShieldCheck, Sparkles, Settings, 
   Upload, ArrowLeft, Github, Database, FileText, 
-  CheckCircle2, Search, PlusCircle, Download, Layers
+  CheckCircle2, Search, PlusCircle, Download, Layers, X
 } from 'lucide-vue-next';
 import UploadCard from './components/UploadCard.vue';
 import ChatSidebar from './components/ChatSidebar.vue';

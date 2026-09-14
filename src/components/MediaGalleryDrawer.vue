@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue';
 import { 
-  X, ExternalLink, Link2, FileText, Image as ImageIcon, 
+  X, ExternalLink, Link2, FileText, ImageIcon, 
   Play, Pause, Mic, FolderOpen, Calendar, ArrowUpRight 
 } from 'lucide-vue-next';
 

@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick, onMounted } from 'vue';
 import { 
   Search, Calendar, Download, Sparkles, CheckCheck, 
-  ArrowDown, Users, ChevronRight, X, Play, Pause, FileText, Image as ImageIcon,
+  ArrowDown, Users, ChevronRight, X, Play, Pause, FileText, ImageIcon,
   Clock, Check, BarChart3, Paperclip, Mic
 } from 'lucide-vue-next';
 
