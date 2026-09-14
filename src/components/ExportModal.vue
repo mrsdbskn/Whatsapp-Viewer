@@ -1,7 +1,10 @@
 <script setup>
 import { ref, computed } from 'vue';
-import { Download, Copy, Check, X, FileText, FileCode, CheckCircle2 } from 'lucide-vue-next';
-import { generateWhatsAppTxt, generateWhatsAppJson, triggerDownload } from '../utils/export.js';
+import { 
+  Download, Copy, Check, X, FileText, 
+  FileCode, Globe, Printer 
+} from 'lucide-vue-next';
+import { generateWhatsAppTxt, generateWhatsAppJson, generateStyledHtmlExport, triggerDownload } from '../utils/export.js';
 
 const props = defineProps({
   isOpen: {
@@ -20,7 +23,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close']);
 
-const exportFormat = ref('txt'); // 'txt' | 'json'
+const exportFormat = ref('html'); // 'html' | 'txt' | 'json'
 const copied = ref(false);
 
 const sanitizedName = computed(() => {
@@ -30,6 +33,12 @@ const sanitizedName = computed(() => {
 const exportContent = computed(() => {
   if (exportFormat.value === 'json') {
     return generateWhatsAppJson({
+      chatName: props.thread?.displayName || 'Contact',
+      messages: props.messages
+    });
+  }
+  if (exportFormat.value === 'html') {
+    return generateStyledHtmlExport({
       chatName: props.thread?.displayName || 'Contact',
       messages: props.messages
     });
@@ -46,8 +55,16 @@ const previewSnippet = computed(() => {
 });
 
 function handleDownload() {
-  const ext = exportFormat.value === 'json' ? 'json' : 'txt';
-  const mime = exportFormat.value === 'json' ? 'application/json' : 'text/plain;charset=utf-8';
+  let ext = 'html';
+  let mime = 'text/html;charset=utf-8';
+  if (exportFormat.value === 'json') {
+    ext = 'json';
+    mime = 'application/json';
+  } else if (exportFormat.value === 'txt') {
+    ext = 'txt';
+    mime = 'text/plain;charset=utf-8';
+  }
+
   const filename = `WhatsApp_Chat_${sanitizedName.value}.${ext}`;
   triggerDownload(exportContent.value, filename, mime);
 }
@@ -76,7 +93,7 @@ async function handleCopy() {
           </div>
           <div>
             <h3 class="text-sm font-semibold text-waText-primary">
-              Export Chat Thread
+              Export Conversation
             </h3>
             <p class="text-xs text-waText-secondary">
               {{ thread.displayName }} &bull; {{ messages.length }} messages
@@ -94,44 +111,61 @@ async function handleCopy() {
 
       <!-- Modal Body -->
       <div class="p-6 space-y-4">
-        <!-- Format Selection -->
+        <!-- Format Selection (3 Options) -->
         <div>
           <label class="text-xs font-semibold text-waText-secondary uppercase tracking-wider block mb-2">
             Select Export Format
           </label>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-3 gap-2.5">
+            <!-- Option 1: Styled HTML (Print/PDF) -->
+            <button
+              type="button"
+              @click="exportFormat = 'html'"
+              class="flex flex-col items-start gap-1 p-3 rounded-xl border text-left transition-all"
+              :class="[
+                exportFormat === 'html'
+                  ? 'border-wa-emerald bg-wa-emerald/10 text-waText-primary'
+                  : 'border-oled-700 hover:border-oled-600 bg-oled-850 text-waText-secondary'
+              ]"
+            >
+              <div class="flex items-center justify-between w-full">
+                <Globe class="w-4 h-4" :class="exportFormat === 'html' ? 'text-wa-emerald' : 'text-waText-secondary'" />
+                <span class="text-[9px] font-mono uppercase bg-wa-emerald/20 text-wa-emerald px-1 rounded">Best</span>
+              </div>
+              <span class="text-xs font-semibold text-waText-primary mt-1">Styled HTML</span>
+              <span class="text-[10px] text-waText-secondary">OLED Bubbles + PDF Print</span>
+            </button>
+
+            <!-- Option 2: WhatsApp TXT -->
             <button
               type="button"
               @click="exportFormat = 'txt'"
-              class="flex items-center gap-3 p-3 rounded-xl border text-left transition-all"
+              class="flex flex-col items-start gap-1 p-3 rounded-xl border text-left transition-all"
               :class="[
                 exportFormat === 'txt'
                   ? 'border-wa-emerald bg-wa-emerald/10 text-waText-primary'
                   : 'border-oled-700 hover:border-oled-600 bg-oled-850 text-waText-secondary'
               ]"
             >
-              <FileText class="w-5 h-5" :class="exportFormat === 'txt' ? 'text-wa-emerald' : 'text-waText-secondary'" />
-              <div>
-                <span class="text-xs font-semibold block text-waText-primary">WhatsApp TXT</span>
-                <span class="text-[10px] text-waText-secondary">Standard [DD/MM/YYYY, HH:MM]</span>
-              </div>
+              <FileText class="w-4 h-4" :class="exportFormat === 'txt' ? 'text-wa-emerald' : 'text-waText-secondary'" />
+              <span class="text-xs font-semibold text-waText-primary mt-1">WhatsApp TXT</span>
+              <span class="text-[10px] text-waText-secondary">[DD/MM/YYYY, HH:MM]</span>
             </button>
 
+            <!-- Option 3: JSON Format -->
             <button
               type="button"
               @click="exportFormat = 'json'"
-              class="flex items-center gap-3 p-3 rounded-xl border text-left transition-all"
+              class="flex flex-col items-start gap-1 p-3 rounded-xl border text-left transition-all"
               :class="[
                 exportFormat === 'json'
                   ? 'border-wa-emerald bg-wa-emerald/10 text-waText-primary'
                   : 'border-oled-700 hover:border-oled-600 bg-oled-850 text-waText-secondary'
               ]"
             >
-              <FileCode class="w-5 h-5" :class="exportFormat === 'json' ? 'text-wa-emerald' : 'text-waText-secondary'" />
-              <div>
-                <span class="text-xs font-semibold block text-waText-primary">JSON Format</span>
-                <span class="text-[10px] text-waText-secondary">Full structured metadata</span>
-              </div>
+              <FileCode class="w-4 h-4" :class="exportFormat === 'json' ? 'text-wa-emerald' : 'text-waText-secondary'" />
+              <span class="text-xs font-semibold text-waText-primary mt-1">Raw JSON</span>
+              <span class="text-[10px] text-waText-secondary">Structured metadata</span>
             </button>
           </div>
         </div>
@@ -139,10 +173,10 @@ async function handleCopy() {
         <!-- Preview Box -->
         <div>
           <div class="flex items-center justify-between text-xs font-medium text-waText-secondary mb-1.5">
-            <span>Preview</span>
+            <span>Code Preview</span>
             <span class="text-[10px] font-mono">{{ messages.length }} messages</span>
           </div>
-          <pre class="bg-oled-900 border border-oled-700 rounded-xl p-3 text-[11px] font-mono text-waText-primary overflow-x-auto max-h-48 scrollbar-thin scrollbar-thumb-zinc-700 leading-relaxed">{{ previewSnippet }}</pre>
+          <pre class="bg-oled-900 border border-oled-700 rounded-xl p-3 text-[11px] font-mono text-waText-primary overflow-x-auto max-h-44 scrollbar-thin scrollbar-thumb-zinc-700 leading-relaxed">{{ previewSnippet }}</pre>
         </div>
       </div>
 
@@ -155,7 +189,7 @@ async function handleCopy() {
         >
           <Check v-if="copied" class="w-4 h-4 text-wa-emerald" />
           <Copy v-else class="w-4 h-4" />
-          <span>{{ copied ? 'Copied to Clipboard!' : 'Copy to Clipboard' }}</span>
+          <span>{{ copied ? 'Copied!' : 'Copy Code' }}</span>
         </button>
 
         <button

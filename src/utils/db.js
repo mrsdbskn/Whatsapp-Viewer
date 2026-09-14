@@ -9,13 +9,25 @@ let sqlEngineInstance = null;
 export async function getSqlEngine() {
   if (sqlEngineInstance) return sqlEngineInstance;
 
-  try {
-    // Attempt local load first (via public/ or relative dist)
-    sqlEngineInstance = await initSqlJs({
-      locateFile: file => {
-        // Support relative path for GitHub Pages
-        return `./${file}`;
+  // Support Node.js testing environment
+  if (typeof process !== 'undefined' && process.versions && process.versions.node && typeof window === 'undefined') {
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      const wasmPath = path.resolve('node_modules/sql.js/dist/sql-wasm.wasm');
+      if (fs.existsSync(wasmPath)) {
+        const wasmBinary = fs.readFileSync(wasmPath);
+        sqlEngineInstance = await initSqlJs({ wasmBinary });
+        return sqlEngineInstance;
       }
+    } catch (nodeErr) {
+      console.warn('Node wasm loading fallback:', nodeErr);
+    }
+  }
+
+  try {
+    sqlEngineInstance = await initSqlJs({
+      locateFile: file => `./${file}`
     });
     return sqlEngineInstance;
   } catch (err) {
@@ -81,7 +93,6 @@ export function formatJid(jid) {
  * @returns {Array<Object>} List of conversation threads
  */
 export function fetchChatThreads(db) {
-  // Check if standard modern tables exist
   const tableCheck = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('chat', 'jid', 'message', 'messages');");
   const tables = tableCheck.length && tableCheck[0].values ? tableCheck[0].values.map(r => r[0]) : [];
 
@@ -109,7 +120,6 @@ export function fetchChatThreads(db) {
           const msgCount = row[3];
           const isGroup = jid ? jid.endsWith('@g.us') : false;
 
-          // Fetch last message snippet for preview
           let lastMsg = '';
           let lastTimestamp = 0;
           try {
@@ -138,9 +148,7 @@ export function fetchChatThreads(db) {
               }
               lastTimestamp = r[1] || 0;
             }
-          } catch {
-            // Ignore preview error
-          }
+          } catch {}
 
           let formattedName = rawDisplayName;
           if (rawDisplayName === jid) {
@@ -205,7 +213,6 @@ export function fetchChatThreads(db) {
 
 /**
  * Normalizes timestamps to valid JS millisecond epoch.
- * Some WhatsApp tables store in ms (13 digits), others in seconds (10 digits).
  * @param {number} ts 
  * @returns {number}
  */
@@ -229,7 +236,6 @@ export function fetchMessagesForChat(db, chatId, filters = {}) {
   const { searchQuery = '', sender = 'all', startDate = null, endDate = null } = filters;
 
   try {
-    // Check if modern message table exists
     const query = `
       SELECT 
         _id, 
@@ -252,15 +258,12 @@ export function fetchMessagesForChat(db, chatId, filters = {}) {
       const row = stmt.getAsObject();
       const rawTimestamp = normalizeTimestamp(row.timestamp);
 
-      // Filter: sender
       if (sender === 'sent' && !row.from_me) continue;
       if (sender === 'received' && row.from_me) continue;
 
-      // Filter: date range
       if (startDate && rawTimestamp < startDate) continue;
       if (endDate && rawTimestamp > endDate) continue;
 
-      // Filter: search text
       const text = row.text_data || '';
       if (searchQuery && !text.toLowerCase().includes(searchQuery.toLowerCase())) {
         continue;
@@ -273,14 +276,13 @@ export function fetchMessagesForChat(db, chatId, filters = {}) {
         timestamp: rawTimestamp,
         text: text,
         type: row.message_type,
-        status: row.status, // 0: sent, 4: delivered, 5/13: read
+        status: row.status,
       });
     }
     stmt.free();
     return messages;
   } catch (err) {
     console.warn('fetchMessagesForChat failed on modern schema, trying legacy...', err);
-    // Legacy fallback
     try {
       const res = db.exec(`
         SELECT _id, key_remote_jid, key_from_me, timestamp, data
@@ -298,15 +300,132 @@ export function fetchMessagesForChat(db, chatId, filters = {}) {
           status: 13
         }));
       }
-    } catch {
-      // Return empty
-    }
+    } catch {}
     return [];
   }
 }
 
 /**
- * Fetches user's sent message history across all conversations to train the authentic texting AI.
+ * Searches across all messages in all conversation threads simultaneously.
+ * 
+ * @param {any} db sql.js Database instance
+ * @param {string} query Search text
+ * @returns {Array<Object>} List of matching results with chat metadata
+ */
+export function searchAllMessages(db, query = '') {
+  if (!query || !query.trim()) return [];
+  const cleanQuery = `%${query.trim().toLowerCase()}%`;
+
+  try {
+    const sql = `
+      SELECT 
+        m._id, 
+        m.chat_row_id, 
+        m.from_me, 
+        m.timestamp, 
+        m.text_data,
+        COALESCE(c.subject, j.raw_string) as chat_name
+      FROM message m
+      JOIN chat c ON m.chat_row_id = c._id
+      JOIN jid j ON c.jid_row_id = j._id
+      WHERE lower(m.text_data) LIKE ?
+      ORDER BY m.timestamp DESC
+      LIMIT 100;
+    `;
+
+    const stmt = db.prepare(sql);
+    stmt.bind([cleanQuery]);
+
+    const results = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      results.push({
+        id: row._id,
+        chatId: row.chat_row_id,
+        chatName: row.chat_name || 'Contact',
+        fromMe: Boolean(row.from_me),
+        timestamp: normalizeTimestamp(row.timestamp),
+        text: row.text_data
+      });
+    }
+    stmt.free();
+    return results;
+  } catch (err) {
+    console.warn('searchAllMessages failed:', err);
+    return [];
+  }
+}
+
+/**
+ * Merges a secondary SQLite backup into the active primary in-memory database,
+ * deduplicating records by key_id or (chat_row_id, timestamp, text_data).
+ * 
+ * @param {any} primaryDb 
+ * @param {Uint8Array} secondaryBytes 
+ * @returns {Promise<Object>} { importedCount: number, duplicateCount: number }
+ */
+export async function mergeSqliteDatabases(primaryDb, secondaryBytes) {
+  const SQL = await getSqlEngine();
+  const secondaryDb = new SQL.Database(secondaryBytes);
+
+  let importedCount = 0;
+  let duplicateCount = 0;
+
+  try {
+    // Read all messages from secondary database
+    const secMsgRes = secondaryDb.exec(`
+      SELECT chat_row_id, from_me, key_id, timestamp, text_data, message_type, status
+      FROM message;
+    `);
+
+    if (secMsgRes.length > 0 && secMsgRes[0].values) {
+      const insertStmt = primaryDb.prepare(`
+        INSERT INTO message (chat_row_id, from_me, key_id, timestamp, text_data, message_type, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+      `);
+
+      const rows = secMsgRes[0].values;
+      for (const r of rows) {
+        const [chatId, fromMe, keyId, ts, text, type, status] = r;
+
+        // Check for duplicates
+        let isDup = false;
+        if (keyId) {
+          const checkStmt = primaryDb.prepare(`SELECT _id FROM message WHERE key_id = ? LIMIT 1;`);
+          checkStmt.bind([keyId]);
+          if (checkStmt.step()) isDup = true;
+          checkStmt.free();
+        }
+
+        if (!isDup && ts && text) {
+          const checkStmt2 = primaryDb.prepare(`
+            SELECT _id FROM message 
+            WHERE chat_row_id = ? AND timestamp = ? AND text_data = ?
+            LIMIT 1;
+          `);
+          checkStmt2.bind([chatId, ts, text]);
+          if (checkStmt2.step()) isDup = true;
+          checkStmt2.free();
+        }
+
+        if (isDup) {
+          duplicateCount++;
+        } else {
+          insertStmt.run([chatId, fromMe, keyId, ts, text, type || 0, status || 13]);
+          importedCount++;
+        }
+      }
+      insertStmt.free();
+    }
+  } finally {
+    secondaryDb.close();
+  }
+
+  return { importedCount, duplicateCount };
+}
+
+/**
+ * Fetches user's sent message history across all conversations.
  * 
  * @param {any} db sql.js Database instance
  * @param {number} [limit=150]
@@ -324,29 +443,12 @@ export function fetchUserSentHistory(db, limit = 150) {
     if (res.length > 0 && res[0].values) {
       return res[0].values.map(r => r[0]);
     }
-  } catch {
-    // Legacy fallback
-    try {
-      const res = db.exec(`
-        SELECT data 
-        FROM messages 
-        WHERE key_from_me = 1 AND data IS NOT NULL AND length(trim(data)) > 0
-        ORDER BY timestamp DESC 
-        LIMIT ${limit};
-      `);
-      if (res.length > 0 && res[0].values) {
-        return res[0].values.map(r => r[0]);
-      }
-    } catch {
-      return [];
-    }
-  }
+  } catch {}
   return [];
 }
 
 /**
- * Generates an authentic, pre-populated SQLite database in memory representing realistic
- * WhatsApp Android chats with contacts, group threads, timestamps, and varied sent messages.
+ * Generates an authentic, pre-populated SQLite database in memory.
  * 
  * @returns {Promise<Uint8Array>} Raw SQLite database bytes
  */
@@ -354,7 +456,6 @@ export async function generateMockWhatsAppDb() {
   const SQL = await getSqlEngine();
   const db = new SQL.Database();
 
-  // Create standard WhatsApp schema
   db.run(`
     CREATE TABLE jid (
       _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,7 +484,6 @@ export async function generateMockWhatsAppDb() {
     );
   `);
 
-  // Insert contacts/JIDs
   db.run(`
     INSERT INTO jid (_id, raw_string, user, server) VALUES 
     (1, '14155552671@s.whatsapp.net', '14155552671', 's.whatsapp.net'),
@@ -397,7 +497,6 @@ export async function generateMockWhatsAppDb() {
   const oneHour = 3600 * 1000;
   const oneDay = 24 * oneHour;
 
-  // Insert chats
   db.run(`
     INSERT INTO chat (_id, jid_row_id, subject, created_timestamp, sort_timestamp) VALUES
     (1, 1, 'Sarah Jenkins', ${now - 7 * oneDay}, ${now - 12 * 60 * 1000}),
@@ -407,19 +506,18 @@ export async function generateMockWhatsAppDb() {
     (5, 5, 'Weekend Tennis Club 🎾', ${now - 40 * oneDay}, ${now - 2 * oneDay});
   `);
 
-  // Realistic conversations with rich messaging, timestamps, and questions
   const conversationData = [
     // Sarah Jenkins (Chat 1)
     { chatId: 1, fromMe: 0, time: now - 3 * oneHour, text: "Hey! Are we still on for lunch today? That new Thai place down 4th street just opened 🍜" },
     { chatId: 1, fromMe: 1, time: now - 2 * oneHour - 45 * 60 * 1000, text: "hey! yeah definitely, dying to try their pad see ew tbh" },
-    { chatId: 1, fromMe: 1, time: now - 2 * oneHour - 44 * 60 * 1000, text: "is 12:30 good for you?" },
+    { chatId: 1, fromMe: 1, time: now - 2 * oneHour - 44 * 60 * 1000, text: "is 12:30 good for you? check their menu at https://thaibasilmenu.example.com" },
     { chatId: 1, fromMe: 0, time: now - 2 * oneHour - 10 * 60 * 1000, text: "12:30 is perfect! Let's grab a table outside if the sun stays out ☀️" },
     { chatId: 1, fromMe: 0, time: now - 40 * 60 * 1000, text: "I'm heading out now! Let me know if you want me to order an iced matcha for you while I wait?" },
     { chatId: 1, fromMe: 1, time: now - 18 * 60 * 1000, text: "omg please, oat milk if they have it haha 🙏" },
     { chatId: 1, fromMe: 0, time: now - 12 * 60 * 1000, text: "Got it! Table by the patio. How far away are you?" },
 
     // Design Systems & Frontend (Chat 2)
-    { chatId: 2, fromMe: 0, time: now - 5 * oneHour, text: "Quick update: The Figma tokens for the OLED dark mode are finalized in branch feature/tokens-v3." },
+    { chatId: 2, fromMe: 0, time: now - 5 * oneHour, text: "Quick update: The Figma tokens for the OLED dark mode are finalized in branch feature/tokens-v3: https://github.com/example/tokens" },
     { chatId: 2, fromMe: 0, time: now - 4 * oneHour, text: "Does everyone agree on using #0B141A for the base canvas rather than pure #000000?" },
     { chatId: 2, fromMe: 1, time: now - 3 * oneHour - 30 * 60 * 1000, text: "100% yes, pure black causes noticeable smearing when scrolling on OLED screens" },
     { chatId: 2, fromMe: 1, time: now - 3 * oneHour - 29 * 60 * 1000, text: "slate 900 looks way cleaner and elevates the cards nicely" },
@@ -427,7 +525,7 @@ export async function generateMockWhatsAppDb() {
     { chatId: 2, fromMe: 0, time: now - 45 * 60 * 1000, text: "Should we cut the v1.2 release tag this afternoon or wait until Monday morning?" },
 
     // Alex Rivera (Chat 3)
-    { chatId: 3, fromMe: 0, time: now - 8 * oneHour, text: "Hey man, did you see the query optimizer metrics for sql.js?" },
+    { chatId: 3, fromMe: 0, time: now - 8 * oneHour, text: "Hey man, did you see the query optimizer metrics for sql.js? https://sql.js.org/docs" },
     { chatId: 3, fromMe: 1, time: now - 7 * oneHour, text: "yeah checked it earlier! in-memory execution is under 15ms for 10k messages, crazy fast" },
     { chatId: 3, fromMe: 0, time: now - 5 * oneHour, text: "Awesome. Also wanted to ask if you've had a chance to test Gemini 3.8 Flash for style extraction?" },
     { chatId: 3, fromMe: 1, time: now - 4 * oneHour, text: "playing with the prompt engineering right now, testing persona mimicry on sent history" },
@@ -441,7 +539,7 @@ export async function generateMockWhatsAppDb() {
     { chatId: 4, fromMe: 0, time: now - 1 * oneDay, text: "Wonderful! We'll start around 6pm. Love you! 💕" },
 
     // Weekend Tennis Club (Chat 5)
-    { chatId: 5, fromMe: 0, time: now - 3 * oneDay, text: "Courts 3 and 4 booked for Saturday 9am. Who is playing doubles?" },
+    { chatId: 5, fromMe: 0, time: now - 3 * oneDay, text: "Courts 3 and 4 booked for Saturday 9am. Who is playing doubles? Location: https://maps.example.com/tennis" },
     { chatId: 5, fromMe: 1, time: now - 3 * oneDay + 30 * 60 * 1000, text: "count me in! bringing a fresh can of balls" },
     { chatId: 5, fromMe: 0, time: now - 2 * oneDay, text: "Awesome, that makes four of us. See you all Saturday morning!" }
   ];
@@ -456,7 +554,12 @@ export async function generateMockWhatsAppDb() {
   });
   stmt.free();
 
-  // Export raw binary
+  // Add a sample voice note (message_type = 2) to Sarah's chat
+  db.run(`
+    INSERT INTO message (chat_row_id, from_me, key_id, timestamp, text_data, message_type, status)
+    VALUES (1, 0, 'VOICE_SAMPLE_1', ${now - 25 * 60 * 1000}, 'Voice Message (0:24)', 2, 13);
+  `);
+
   const binary = db.export();
   db.close();
   return binary;

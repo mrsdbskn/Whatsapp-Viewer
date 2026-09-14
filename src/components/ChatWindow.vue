@@ -2,8 +2,8 @@
 import { ref, computed, watch, nextTick, onMounted } from 'vue';
 import { 
   Search, Calendar, Download, Sparkles, CheckCheck, 
-  ArrowDown, Users, ChevronRight, X, Play, FileText, Image as ImageIcon,
-  Clock, Check
+  ArrowDown, Users, ChevronRight, X, Play, Pause, FileText, Image as ImageIcon,
+  Clock, Check, BarChart3, Paperclip, Mic
 } from 'lucide-vue-next';
 
 const props = defineProps({
@@ -17,25 +17,32 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['open-ai-drawer', 'open-export-modal']);
+const emit = defineEmits([
+  'open-ai-drawer', 
+  'open-export-modal', 
+  'open-analytics', 
+  'open-media'
+]);
 
 const messagesContainer = ref(null);
 const showSearch = ref(false);
 const showDateFilter = ref(false);
 const inChatSearch = ref('');
-const senderFilter = ref('all'); // 'all' | 'sent' | 'received'
+const senderFilter = ref('all');
 const startDate = ref('');
 const endDate = ref('');
 const showScrollBottom = ref(false);
 
+// Voice note interactive playback simulation
+const playingVoiceId = ref(null);
+const playbackProgress = ref(0);
+
 // Filter messages locally in window
 const filteredMessages = computed(() => {
   return props.messages.filter(msg => {
-    // Sender filter
     if (senderFilter.value === 'sent' && !msg.fromMe) return false;
     if (senderFilter.value === 'received' && msg.fromMe) return false;
 
-    // Date range filter
     if (startDate.value) {
       const startMs = new Date(startDate.value).setHours(0, 0, 0, 0);
       if (msg.timestamp < startMs) return false;
@@ -45,7 +52,6 @@ const filteredMessages = computed(() => {
       if (msg.timestamp > endMs) return false;
     }
 
-    // Search query filter
     if (inChatSearch.value.trim()) {
       const q = inChatSearch.value.toLowerCase().trim();
       const text = (msg.text || '').toLowerCase();
@@ -56,7 +62,7 @@ const filteredMessages = computed(() => {
   });
 });
 
-// Group messages by date for date separator pill
+// Group messages by date
 const groupedByDate = computed(() => {
   const groups = [];
   let currentDateStr = '';
@@ -119,7 +125,6 @@ function handleScroll() {
   showScrollBottom.value = scrollHeight - scrollTop - clientHeight > 300;
 }
 
-// Highlight search query in text
 function highlightText(text, query) {
   if (!query || !query.trim() || !text) return text;
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -127,12 +132,33 @@ function highlightText(text, query) {
   return text.replace(regex, '<mark class="bg-amber-400 text-black px-0.5 rounded font-semibold">$1</mark>');
 }
 
-// Reset filters
 function clearFilters() {
   inChatSearch.value = '';
   startDate.value = '';
   endDate.value = '';
   senderFilter.value = 'all';
+}
+
+function toggleVoicePlay(msgId) {
+  if (playingVoiceId.value === msgId) {
+    playingVoiceId.value = null;
+    playbackProgress.value = 0;
+  } else {
+    playingVoiceId.value = msgId;
+    playbackProgress.value = 10;
+    const interval = setInterval(() => {
+      if (playingVoiceId.value !== msgId) {
+        clearInterval(interval);
+        return;
+      }
+      playbackProgress.value += 15;
+      if (playbackProgress.value >= 100) {
+        playingVoiceId.value = null;
+        playbackProgress.value = 0;
+        clearInterval(interval);
+      }
+    }, 400);
+  }
 }
 
 watch(() => props.thread?.chatId, () => {
@@ -173,14 +199,34 @@ onMounted(() => {
       </div>
 
       <!-- Header Action Controls -->
-      <div class="flex items-center gap-1.5 sm:gap-2">
+      <div class="flex items-center gap-1 sm:gap-2">
+        <!-- Analytics Modal Button -->
+        <button
+          type="button"
+          @click="emit('open-analytics')"
+          class="p-2 rounded-lg transition-colors text-waText-secondary hover:text-wa-emerald hover:bg-oled-750"
+          title="View chat analytics & insights"
+        >
+          <BarChart3 class="w-4 h-4" />
+        </button>
+
+        <!-- Media & Links Button -->
+        <button
+          type="button"
+          @click="emit('open-media')"
+          class="p-2 rounded-lg transition-colors text-waText-secondary hover:text-wa-emerald hover:bg-oled-750"
+          title="Shared media & links"
+        >
+          <Paperclip class="w-4 h-4" />
+        </button>
+
         <!-- In-Chat Search Button -->
         <button
           type="button"
           @click="showSearch = !showSearch"
           class="p-2 rounded-lg transition-colors text-waText-secondary hover:text-waText-primary"
           :class="showSearch || inChatSearch ? 'bg-oled-700 text-wa-emerald' : 'hover:bg-oled-750'"
-          title="Search within conversation"
+          title="Search in conversation"
         >
           <Search class="w-4 h-4" />
         </button>
@@ -196,22 +242,23 @@ onMounted(() => {
           <Calendar class="w-4 h-4" />
         </button>
 
-        <!-- Export to TXT Button -->
+        <!-- Export Button -->
         <button
           type="button"
           @click="emit('open-export-modal', { thread, messages: filteredMessages })"
           class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-oled-750 hover:bg-oled-700 text-waText-primary border border-oled-700 transition-colors"
-          title="Export filtered conversation to TXT"
+          title="Export conversation"
         >
           <Download class="w-3.5 h-3.5 text-wa-emerald" />
-          <span class="hidden sm:inline">Export TXT</span>
+          <span class="hidden md:inline">Export</span>
         </button>
 
-        <!-- AI Reply Button -->
+        <!-- AI Assistant Button -->
         <button
           type="button"
           @click="emit('open-ai-drawer', { thread, messages: props.messages })"
           class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-ai-violet to-purple-600 hover:from-purple-500 hover:to-ai-violet text-white shadow-ai-glow transition-all active:scale-95 cursor-pointer"
+          title="AI Reply & TL;DR Summarizer"
         >
           <Sparkles class="w-3.5 h-3.5" />
           <span>AI Reply</span>
@@ -224,7 +271,6 @@ onMounted(() => {
       v-if="showSearch || showDateFilter || inChatSearch || startDate || endDate || senderFilter !== 'all'"
       class="bg-oled-850/95 border-b border-oled-700 px-4 py-2.5 flex flex-wrap items-center gap-3 text-xs z-10 animate-fade-in backdrop-blur-sm"
     >
-      <!-- Search Input -->
       <div v-if="showSearch || inChatSearch" class="relative flex-1 min-w-[180px]">
         <input
           v-model="inChatSearch"
@@ -242,7 +288,6 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- Date Pickers -->
       <div v-if="showDateFilter || startDate || endDate" class="flex items-center gap-2">
         <div class="flex items-center gap-1 text-[11px] text-waText-secondary">
           <span>From:</span>
@@ -262,7 +307,6 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- Sender Filter Selector -->
       <div class="flex items-center bg-oled-800 p-0.5 rounded-lg border border-oled-700 text-[11px]">
         <button 
           type="button" 
@@ -290,7 +334,6 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- Results Count & Reset Button -->
       <div class="flex items-center gap-2 ml-auto text-[11px] text-waText-secondary">
         <span>{{ filteredMessages.length }} shown</span>
         <button 
@@ -323,7 +366,6 @@ onMounted(() => {
 
       <!-- Groups by Date -->
       <div v-for="group in groupedByDate" :key="group.dateLabel" class="space-y-2">
-        <!-- Date Separator Badge -->
         <div class="flex justify-center my-3 sticky top-2 z-10">
           <span class="px-3 py-1 rounded-lg bg-oled-800/90 border border-oled-700 text-waText-secondary text-[11px] font-medium shadow-sm backdrop-blur-sm">
             {{ group.dateLabel }}
@@ -337,7 +379,6 @@ onMounted(() => {
           class="flex flex-col"
           :class="msg.fromMe ? 'items-end' : 'items-start'"
         >
-          <!-- Message Bubble Container -->
           <div
             class="max-w-[85%] sm:max-w-[70%] md:max-w-[60%] rounded-xl px-3 py-1.5 shadow-bubble relative transition-all group select-text"
             :class="[
@@ -346,7 +387,7 @@ onMounted(() => {
                 : 'bg-bubble-received text-waText-primary rounded-tl-none border border-oled-700/60'
             ]"
           >
-            <!-- Group Sender Name if Received & Group -->
+            <!-- Group Sender Name -->
             <div 
               v-if="!msg.fromMe && thread.isGroup" 
               class="text-[11px] font-semibold text-emerald-400 mb-0.5"
@@ -354,8 +395,44 @@ onMounted(() => {
               {{ thread.displayName }}
             </div>
 
-            <!-- Media Item Layouts -->
-            <div v-if="msg.type === 1" class="mb-1 rounded-lg bg-oled-900/40 p-3 flex items-center gap-2.5 border border-white/5">
+            <!-- Voice Note Message Layout with Interactive Waveforms -->
+            <div 
+              v-if="msg.type === 2 || (msg.text && msg.text.includes('Voice Message'))" 
+              class="mb-1 rounded-lg bg-oled-900/50 p-2.5 flex items-center gap-3 border border-white/5 min-w-[220px]"
+            >
+              <button 
+                type="button"
+                @click="toggleVoicePlay(msg.id)"
+                class="w-9 h-9 rounded-full bg-wa-emerald/20 text-wa-emerald flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition-transform"
+              >
+                <Pause v-if="playingVoiceId === msg.id" class="w-4 h-4 fill-current" />
+                <Play v-else class="w-4 h-4 fill-current ml-0.5" />
+              </button>
+
+              <div class="flex-1 space-y-1.5">
+                <!-- Simulated Waveform Bars -->
+                <div class="flex items-center gap-0.5 h-6">
+                  <div 
+                    v-for="bar in [40, 75, 50, 90, 60, 85, 45, 95, 70, 50, 65, 80, 55, 90, 40]" 
+                    :key="bar"
+                    class="w-1 rounded-full transition-all duration-200"
+                    :class="playingVoiceId === msg.id ? 'bg-wa-emerald animate-pulse' : 'bg-white/30'"
+                    :style="{ height: `${bar}%` }"
+                  ></div>
+                </div>
+
+                <div class="flex justify-between text-[10px] text-waText-secondary font-mono">
+                  <span>{{ playingVoiceId === msg.id ? `${playbackProgress}%` : '0:24' }}</span>
+                  <span class="flex items-center gap-1">
+                    <Mic class="w-2.5 h-2.5 text-wa-emerald" />
+                    <span>Voice Note</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Image Media Layout -->
+            <div v-else-if="msg.type === 1" class="mb-1 rounded-lg bg-oled-900/40 p-3 flex items-center gap-2.5 border border-white/5">
               <ImageIcon class="w-5 h-5 text-wa-emerald shrink-0" />
               <div class="text-xs">
                 <p class="font-medium text-waText-primary">Photo Attachment</p>
@@ -363,21 +440,7 @@ onMounted(() => {
               </div>
             </div>
 
-            <div v-else-if="msg.type === 2" class="mb-1 rounded-lg bg-oled-900/40 p-2 flex items-center gap-3 border border-white/5 min-w-[200px]">
-              <button class="w-8 h-8 rounded-full bg-wa-emerald/20 text-wa-emerald flex items-center justify-center shrink-0 hover:scale-105 transition-transform">
-                <Play class="w-4 h-4 fill-current ml-0.5" />
-              </button>
-              <div class="flex-1 space-y-1">
-                <div class="h-1 bg-white/20 rounded-full overflow-hidden">
-                  <div class="h-full bg-wa-emerald w-1/3"></div>
-                </div>
-                <div class="flex justify-between text-[10px] text-waText-secondary font-mono">
-                  <span>0:14</span>
-                  <span>Voice Note</span>
-                </div>
-              </div>
-            </div>
-
+            <!-- Document Layout -->
             <div v-else-if="msg.type === 9" class="mb-1 rounded-lg bg-oled-900/40 p-2.5 flex items-center gap-2.5 border border-white/5">
               <FileText class="w-5 h-5 text-ai-violetLight shrink-0" />
               <div class="text-xs truncate">
@@ -386,13 +449,13 @@ onMounted(() => {
               </div>
             </div>
 
-            <!-- Message Text with highlighted search matches -->
+            <!-- Text Content -->
             <p 
               class="text-[13px] leading-relaxed break-words whitespace-pre-wrap selection:bg-wa-emerald/40"
               v-html="highlightText(msg.text, inChatSearch)"
             ></p>
 
-            <!-- Message Footer: Time + Status Tick -->
+            <!-- Time & Status -->
             <div class="flex items-center justify-end gap-1 mt-1 text-[10px] text-waText-secondary float-right ml-3 select-none">
               <span class="font-mono">{{ formatMessageTime(msg.timestamp) }}</span>
               <span v-if="msg.fromMe" class="text-wa-emerald">
