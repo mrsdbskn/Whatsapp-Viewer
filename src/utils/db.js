@@ -1,9 +1,65 @@
 import initSqlJs from 'sql.js';
+import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 
 let sqlEngineInstance = null;
 
 /**
- * Initializes sql.js in memory using local sql-wasm.wasm or CDN fallback.
+ * Loads the raw sql-wasm.wasm ArrayBuffer from multiple resilient sources
+ * (Vite bundled asset, current directory, origin path, or CDN fallback mirrors).
+ * Passing wasmBinary directly to initSqlJs avoids all Emscripten fetch/MIME type issues.
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function loadWasmBinary() {
+  const candidateUrls = [];
+
+  // 1. Vite bundled asset URL
+  if (sqlWasmUrl) {
+    candidateUrls.push(sqlWasmUrl);
+  }
+
+  // 2. Local origin and directory paths (handles both trailing slash and missing slash)
+  if (typeof window !== 'undefined' && window.location) {
+    const loc = window.location;
+    // Normalized pathname with trailing directory
+    let dir = loc.pathname;
+    if (dir.split('/').pop().includes('.')) {
+      dir = dir.substring(0, dir.lastIndexOf('/') + 1);
+    }
+    if (!dir.endsWith('/')) dir += '/';
+
+    candidateUrls.push(`${loc.origin}${dir}sql-wasm.wasm`);
+    candidateUrls.push(`${loc.origin}/Whatsapp-Viewer/sql-wasm.wasm`);
+    candidateUrls.push('./sql-wasm.wasm');
+    candidateUrls.push('/sql-wasm.wasm');
+  }
+
+  // 3. Resilient CDN mirrors with CORS support
+  candidateUrls.push('https://cdn.jsdelivr.net/npm/sql.js@1.12.0/dist/sql-wasm.wasm');
+  candidateUrls.push('https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.wasm');
+  candidateUrls.push('https://unpkg.com/sql.js@1.12.0/dist/sql-wasm.wasm');
+
+  for (const url of candidateUrls) {
+    if (!url) continue;
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const buf = await resp.arrayBuffer();
+        // Check WebAssembly magic bytes (0x00 0x61 0x73 0x6d -> \0asm)
+        const bytes = new Uint8Array(buf, 0, 4);
+        if (bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d) {
+          return buf;
+        }
+      }
+    } catch {
+      // Continue to next candidate URL
+    }
+  }
+
+  throw new Error('Could not load sql-wasm.wasm from local assets or remote mirrors.');
+}
+
+/**
+ * Initializes sql.js in memory using preloaded wasmBinary.
  * @returns {Promise<any>}
  */
 export async function getSqlEngine() {
@@ -26,22 +82,17 @@ export async function getSqlEngine() {
     }
   }
 
+  // Browser environment: Load wasm binary first
   try {
-    sqlEngineInstance = await initSqlJs({
-      locateFile: file => `./${file}`
-    });
+    const wasmBinary = await loadWasmBinary();
+    sqlEngineInstance = await initSqlJs({ wasmBinary });
     return sqlEngineInstance;
   } catch (err) {
-    console.warn('Local WASM init failed, loading from CDN fallback...', err);
-    try {
-      sqlEngineInstance = await initSqlJs({
-        locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
-      });
-      return sqlEngineInstance;
-    } catch (cdnErr) {
-      console.error('Fatal: Failed to load sql.js from both local and CDN sources.', cdnErr);
-      throw cdnErr;
-    }
+    console.warn('wasmBinary load failed, attempting locateFile fallback...', err);
+    sqlEngineInstance = await initSqlJs({
+      locateFile: () => 'https://cdn.jsdelivr.net/npm/sql.js@1.12.0/dist/sql-wasm.wasm'
+    });
+    return sqlEngineInstance;
   }
 }
 
