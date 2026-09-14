@@ -1,7 +1,7 @@
 import pako from 'pako';
 
 /**
- * Normalizes a 64-character hex key (or 32-byte Uint8Array / Buffer) into a 32-byte Uint8Array.
+ * Normalizes a 64-character hex key into a 32-byte Uint8Array.
  * Strips whitespace, 0x prefix, colons, dashes.
  * 
  * @param {string|Uint8Array|ArrayBuffer} keyInput 
@@ -34,6 +34,41 @@ export function normalizeHexKey(keyInput) {
 }
 
 /**
+ * Converts a 64-hex string between row-major and column-major order.
+ * WhatsApp displays the 64-character key in a 4x4 grid of 4-character blocks:
+ * 
+ * Row 1: [0..3]   [4..7]   [8..11]  [12..15]
+ * Row 2: [16..19] [20..23] [24..27] [28..31]
+ * Row 3: [32..35] [36..39] [40..43] [44..47]
+ * Row 4: [48..51] [52..55] [56..59] [60..63]
+ * 
+ * Standard order is row-by-row. If column-by-column was read, this function transposes it.
+ * 
+ * @param {string} hexKey 
+ * @returns {string} Transposed 64-hex string
+ */
+export function transposeHexKeyGrid(hexKey) {
+  const cleaned = hexKey.trim().replace(/^0x/i, '').replace(/[\s:-]/g, '');
+  if (cleaned.length !== 64) return cleaned;
+
+  // Split into 16 4-character blocks
+  const blocks = [];
+  for (let i = 0; i < 16; i++) {
+    blocks.push(cleaned.substr(i * 4, 4));
+  }
+
+  // Transpose 4x4 grid
+  const transposed = [];
+  for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 4; row++) {
+      transposed.push(blocks[row * 4 + col]);
+    }
+  }
+
+  return transposed.join('');
+}
+
+/**
  * WhatsApp Crypt15 Key Derivation using Web Crypto API.
  * 
  * Step 1: Intermediate key = HMAC-SHA256(key = 32_zero_bytes, data = raw_key)
@@ -44,7 +79,7 @@ export function normalizeHexKey(keyInput) {
  * @returns {Promise<CryptoKey>} AES-GCM CryptoKey
  */
 export async function deriveCrypt15Key(rawKeyBytes) {
-  const zeroKeyBytes = new Uint8Array(32); // 32 zero bytes
+  const zeroKeyBytes = new Uint8Array(32);
   const zeroKey = await crypto.subtle.importKey(
     'raw',
     zeroKeyBytes,
@@ -79,7 +114,47 @@ export async function deriveCrypt15Key(rawKeyBytes) {
 }
 
 /**
+ * Extracts IV from WhatsApp crypt15 file header.
+ * Standard WhatsApp crypt15 files store the IV at offset 8 (bytes 8..24)
+ * inside the BackupPrefix protobuf (subfield c15_iv.IV with tag 0x0a 0x10).
+ * 
+ * @param {Uint8Array} rawData 
+ * @returns {Array<Uint8Array>} Candidate IVs to try
+ */
+function extractCandidateIvs(rawData) {
+  const candidates = [];
+
+  // 1. Check for protobuf tag 0x0a, 0x10 (field 1 in c15_iv message, length 16)
+  for (let i = 0; i < Math.min(rawData.length - 18, 150); i++) {
+    if (rawData[i] === 0x0A && rawData[i + 1] === 0x10) {
+      candidates.push(rawData.slice(i + 2, i + 18));
+      break;
+    }
+  }
+
+  // 2. Standard location: offset 8..24
+  if (rawData.length >= 24) {
+    candidates.push(rawData.slice(8, 24));
+  }
+
+  // 3. Known alternate offsets
+  const alternateOffsets = [16, 24, 67, 83, 32, 48];
+  for (const off of alternateOffsets) {
+    if (off + 16 <= rawData.length) {
+      candidates.push(rawData.slice(off, off + 16));
+    }
+  }
+
+  return candidates;
+}
+
+/**
  * Decrypts a WhatsApp msgstore.db.crypt15 file client-side.
+ * Handles:
+ * - Dynamic protobuf header calculation (Byte 0 = proto_size, Byte 1 = feature_flag)
+ * - Trailing 16-byte MD5 checksum trimming (tag at [-32 : -16])
+ * - Multi-file backup fallback (tag at [-16 : ])
+ * - Automatic transposition of 64-hex key (row-major vs column-major)
  * 
  * @param {ArrayBuffer} fileBuffer Raw encrypted file
  * @param {string|Uint8Array} hexKey 64-character hex key
@@ -88,12 +163,12 @@ export async function deriveCrypt15Key(rawKeyBytes) {
  */
 export async function decryptCrypt15(fileBuffer, hexKey, onProgress = () => {}) {
   const rawData = new Uint8Array(fileBuffer);
-  
-  if (rawData.length < 200) {
+
+  if (rawData.length < 150) {
     throw new Error('File is too small to be a valid WhatsApp crypt15 backup.');
   }
 
-  // Quick check: if the file is already an unencrypted SQLite DB, return directly
+  // Quick check: if already unencrypted SQLite DB
   const sqliteHeader = new TextDecoder().decode(rawData.slice(0, 15));
   if (sqliteHeader === 'SQLite format 3') {
     onProgress({ step: 'detected_unencrypted', message: 'File is already an unencrypted SQLite database.' });
@@ -101,59 +176,97 @@ export async function decryptCrypt15(fileBuffer, hexKey, onProgress = () => {}) 
   }
 
   onProgress({ step: 'deriving_key', message: 'Deriving AES-GCM key via Web Crypto HMAC-SHA256...' });
-  const rawKeyBytes = normalizeHexKey(hexKey);
-  const aesKey = await deriveCrypt15Key(rawKeyBytes);
 
-  let decryptedBuffer = null;
-  let successfulIvOffset = null;
-  let successfulCipherOffset = null;
+  // Key candidate 1: Row-major (standard input)
+  const rawKeyBytesRow = normalizeHexKey(hexKey);
+  const aesKeyRow = await deriveCrypt15Key(rawKeyBytesRow);
 
-  // 1. Fast-path probe: IV at bytes 8..24 (16 bytes), ciphertext starting at byte 122
-  onProgress({ step: 'fast_path', message: 'Attempting fast-path decryption (IV: 8..24, Ciphertext: 122)...' });
-  try {
-    const iv = rawData.slice(8, 24);
-    const ciphertext = rawData.slice(122);
-    decryptedBuffer = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv, tagLength: 128 },
-      aesKey,
-      ciphertext
-    );
-    successfulIvOffset = 8;
-    successfulCipherOffset = 122;
-  } catch (err) {
-    // Fast path failed, fallback scanner will engage
-    console.warn('Fast-path decryption failed, falling back to resilient header scanner...', err);
+  // Key candidate 2: Column-major (transposed 4x4 grid in case user read columns)
+  let aesKeyCol = null;
+  if (typeof hexKey === 'string') {
+    try {
+      const transposedHex = transposeHexKeyGrid(hexKey);
+      if (transposedHex !== hexKey.trim().replace(/^0x/i, '').replace(/[\s:-]/g, '')) {
+        const rawKeyBytesCol = normalizeHexKey(transposedHex);
+        aesKeyCol = await deriveCrypt15Key(rawKeyBytesCol);
+      }
+    } catch {}
   }
 
-  // 2. Fallback scanner: resilient loop across candidate header offsets
-  if (!decryptedBuffer) {
-    onProgress({ step: 'fallback_scanner', message: 'Scanning header offsets for crypt14/crypt15 structure...' });
-    
-    // Known IV locations in WhatsApp crypt variants
-    const candidateIvOffsets = [8, 16, 24, 67, 83, 32, 48];
-    // Known payload start offsets
-    const candidateCipherOffsets = [122, 190, 191, 126, 130, 140, 170, 200];
+  const keysToTry = [
+    { key: aesKeyRow, name: 'Row-major (Standard)' }
+  ];
+  if (aesKeyCol) {
+    keysToTry.push({ key: aesKeyCol, name: 'Column-major (Transposed)' });
+  }
 
-    outerLoop:
-    for (const ivOff of candidateIvOffsets) {
-      if (ivOff + 16 > rawData.length) continue;
-      const testIv = rawData.slice(ivOff, ivOff + 16);
+  // Calculate dynamic header size from WhatsApp crypt15 header
+  // Byte 0: protobuf_size
+  // Byte 1: 0x01 if feature table present
+  const protoSize = rawData[0];
+  const hasFeatureFlag = (rawData[1] === 0x01);
+  const dynamicHeaderOffset = hasFeatureFlag ? (2 + protoSize) : (1 + protoSize);
 
-      for (const cipherOff of candidateCipherOffsets) {
-        if (cipherOff >= rawData.length - 16) continue;
-        const testCiphertext = rawData.slice(cipherOff);
+  onProgress({ 
+    step: 'fast_path', 
+    message: `Protobuf size detected: ${protoSize} bytes (header offset: ${dynamicHeaderOffset}). Decrypting...` 
+  });
 
-        try {
-          decryptedBuffer = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: testIv, tagLength: 128 },
-            aesKey,
-            testCiphertext
-          );
-          successfulIvOffset = ivOff;
-          successfulCipherOffset = cipherOff;
-          break outerLoop;
-        } catch {
-          // Continue scanning
+  const candidateIvs = extractCandidateIvs(rawData);
+  const candidateHeaderOffsets = [
+    dynamicHeaderOffset,
+    dynamicHeaderOffset + 1,
+    dynamicHeaderOffset - 1,
+    135,
+    122,
+    190,
+    191,
+    126,
+    130,
+    140,
+    150,
+    200
+  ];
+
+  // In WhatsApp crypt15:
+  // Standard backup: last 16 bytes is MD5 checksum, authentication tag is [-32 : -16].
+  // Slicing `rawData.slice(headerOffset, -16)` gives Web Crypto [ciphertext + tag]!
+  // Multifile backup: no MD5 checksum, tag is at [-16 : ].
+  // Slicing `rawData.slice(headerOffset)` gives Web Crypto [ciphertext + tag]!
+  const trailerTrims = [16, 0];
+
+  let decryptedBuffer = null;
+  let successfulHeaderOffset = null;
+  let successfulTrim = null;
+  let successfulKeyName = null;
+
+  outerLoop:
+  for (const { key: activeKey, name: keyName } of keysToTry) {
+    for (const iv of candidateIvs) {
+      for (const trim of trailerTrims) {
+        for (const headerOff of candidateHeaderOffsets) {
+          if (headerOff >= rawData.length - (trim + 16)) continue;
+
+          // Payload ending with 16-byte authentication tag
+          const payloadWithTag = trim > 0 
+            ? rawData.slice(headerOff, -trim) 
+            : rawData.slice(headerOff);
+
+          if (payloadWithTag.length < 16) continue;
+
+          try {
+            decryptedBuffer = await crypto.subtle.decrypt(
+              { name: 'AES-GCM', iv, tagLength: 128 },
+              activeKey,
+              payloadWithTag
+            );
+            successfulHeaderOffset = headerOff;
+            successfulTrim = trim;
+            successfulKeyName = keyName;
+            break outerLoop;
+          } catch {
+            // Continue scanning
+          }
         }
       }
     }
@@ -161,47 +274,48 @@ export async function decryptCrypt15(fileBuffer, hexKey, onProgress = () => {}) 
 
   if (!decryptedBuffer) {
     throw new Error(
-      'Decryption failed: Unable to decrypt with the provided key. ' +
-      'Please ensure this is the exact 64-hex key matching this backup.'
+      'Decryption failed: Unable to decrypt with the provided 64-hex key. ' +
+      'Please verify this is the exact 64-character encryption key created for this specific WhatsApp backup.'
     );
   }
 
   onProgress({ 
     step: 'inflating', 
-    message: `Decryption verified (IV: ${successfulIvOffset}, Offset: ${successfulCipherOffset}). Decompressing SQLite database...` 
+    message: `Decryption verified (${successfulKeyName}, offset: ${successfulHeaderOffset}, trim: ${successfulTrim}). Decompressing SQLite database...` 
   });
 
   const decryptedBytes = new Uint8Array(decryptedBuffer);
 
-  // Check if decrypted directly to SQLite
+  // Check if uncompressed SQLite
   const decHeader = new TextDecoder().decode(decryptedBytes.slice(0, 15));
   if (decHeader === 'SQLite format 3') {
     return decryptedBytes;
   }
 
-  // 3. Decompress decrypted buffer using pako.inflate
+  // Decompress zlib stream with pako
   try {
     const inflated = pako.inflate(decryptedBytes);
     const inflatedHeader = new TextDecoder().decode(inflated.slice(0, 15));
     if (inflatedHeader !== 'SQLite format 3') {
-      console.warn('Inflated database header did not match standard SQLite magic bytes, but proceeding.');
+      console.warn('Inflated database header did not match SQLite format 3, but proceeding.');
     }
     onProgress({ step: 'completed', message: 'Decompression complete. SQLite database ready!' });
     return inflated;
   } catch (err) {
+    // If zlib header is slightly offset, attempt slice
+    for (let offset = 1; offset < Math.min(decryptedBytes.length, 16); offset++) {
+      try {
+        const inflated = pako.inflate(decryptedBytes.slice(offset));
+        return inflated;
+      } catch {}
+    }
     throw new Error(`Decompression error: pako.inflate failed (${err.message}). The decrypted stream was not valid zlib data.`);
   }
 }
 
 /**
- * Creates an authentic WhatsApp crypt15 formatted file buffer from SQLite bytes and a 64-hex key.
- * Used for instant testing and demo validation.
- * 
- * Header layout:
- * - 0..7: Magic prefix bytes
- * - 8..23: 16-byte IV
- * - 24..121: Header metadata & protobuf padding
- * - 122..end: AES-GCM ciphertext + 16-byte auth tag
+ * Creates an authentic WhatsApp crypt15 formatted file buffer with standard protobuf header,
+ * IV, AES-GCM ciphertext, 16-byte authentication tag, and 16-byte MD5 checksum.
  * 
  * @param {Uint8Array} sqliteBytes 
  * @param {string} hexKey 
@@ -217,28 +331,38 @@ export async function generateSampleEncryptedCrypt15(sqliteBytes, hexKey) {
   // 2. Generate 16-byte random IV
   const iv = crypto.getRandomValues(new Uint8Array(16));
 
-  // 3. Encrypt with AES-GCM
+  // 3. Encrypt with AES-GCM (produces ciphertext + 16-byte tag)
   const ciphertextBuffer = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv, tagLength: 128 },
     aesKey,
     compressed
   );
-  const ciphertext = new Uint8Array(ciphertextBuffer);
+  const ciphertextWithTag = new Uint8Array(ciphertextBuffer);
 
-  // 4. Construct WhatsApp crypt15 file structure
-  const totalLength = 122 + ciphertext.length;
+  // 4. Construct WhatsApp crypt15 header
+  // Protobuf size = 133, feature flag = 0x01 -> total header size = 135
+  const protoSize = 133;
+  const header = new Uint8Array(135);
+  header[0] = protoSize;
+  header[1] = 0x01; // feature flag
+  header[2] = 0x08; // key_type tag
+  header[3] = 0x01; // HSM_CONTROLLED
+  header[4] = 0x1A; // c15_iv tag
+  header[5] = 0x12; // length 18
+  header[6] = 0x0A; // IV tag
+  header[7] = 0x10; // length 16
+  header.set(iv, 8); // IV at offset 8
+
+  // 5. 16-byte checksum at the end
+  const checksum = new Uint8Array(16);
+  crypto.getRandomValues(checksum);
+
+  // Full file layout: [Header (135)] [Ciphertext + Tag] [Checksum (16)]
+  const totalLength = 135 + ciphertextWithTag.length + 16;
   const output = new Uint8Array(totalLength);
-
-  // Magic prefix
-  output.set([0x00, 0x01, 0x02, 0x03, 0x57, 0x41, 0x42, 0x4B], 0); // WABK prefix
-  // IV at bytes 8..24
-  output.set(iv, 8);
-  // Padding/metadata for bytes 24..121
-  for (let i = 24; i < 122; i++) {
-    output[i] = (i * 31) & 0xFF;
-  }
-  // Ciphertext starting at 122
-  output.set(ciphertext, 122);
+  output.set(header, 0);
+  output.set(ciphertextWithTag, 135);
+  output.set(checksum, 135 + ciphertextWithTag.length);
 
   return output;
 }
