@@ -1,17 +1,6 @@
-const CACHE_NAME = 'wa-viewer-v1';
-const ASSETS_TO_CACHE = [
-  './',
-  './index.html',
-  './manifest.webmanifest',
-  './sql-wasm.wasm'
-];
+const CACHE_NAME = 'wa-viewer-v2';
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(ASSETS_TO_CACHE);
-    })
-  );
   self.skipWaiting();
 });
 
@@ -28,10 +17,28 @@ self.addEventListener('activate', (e) => {
   self.clients.claim();
 });
 
+// Network-first strategy for HTML and scripts so user always gets the latest code
 self.addEventListener('fetch', (e) => {
+  if (e.request.mode === 'navigate' || e.request.destination === 'script' || e.request.destination === 'style') {
+    e.respondWith(
+      fetch(e.request)
+        .then((response) => {
+          const resClone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(e.request, resClone));
+          return response;
+        })
+        .catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
   e.respondWith(
-    caches.match(e.request).then((res) => {
-      return res || fetch(e.request);
+    caches.match(e.request).then((cached) => {
+      return cached || fetch(e.request).then((response) => {
+        const resClone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(e.request, resClone));
+        return response;
+      });
     })
   );
 });

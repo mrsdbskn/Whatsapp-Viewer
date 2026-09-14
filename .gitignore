@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Private / Local testing backups & keys (NEVER uploaded to GitHub)
+local_test_data/
+*.crypt15
+*.crypt14
+*.crypt12
+*.key
+msgstore*.db
