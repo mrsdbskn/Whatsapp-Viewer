@@ -1,7 +1,170 @@
 /**
- * Texting style analysis, Gemini 3.8 Flash response generator,
- * and AI Chat Summarizer (TL;DR & Action Items).
+ * Texting style analysis, Gemini 3 response generator,
+ * live model fetching, and AI Chat Summarizer (TL;DR & Action Items).
  */
+
+/**
+ * Curated list of active, modern Gemini 3 models matching Google's latest documentation.
+ * Serves as the rich default/offline catalog when no API key is set yet.
+ */
+export const DEFAULT_GEMINI_MODELS = [
+  {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    desc: 'Most intelligent Flash model for autonomous agents, software engineering & tone analysis.',
+    badge: 'New',
+    isRecommended: true
+  },
+  {
+    id: 'gemini-3.7-flash',
+    name: 'Gemini 3.7 Flash',
+    desc: 'Flagship model for complex coding, agentic workflows, and reliable multi-step execution.',
+    badge: 'Stable'
+  },
+  {
+    id: 'gemini-3.6-flash',
+    name: 'Gemini 3.6 Flash',
+    desc: 'Official recommended replacement for Gemini 2.5. Balanced speed and multimodal capabilities.',
+    badge: 'Stable',
+    isRecommended: true
+  },
+  {
+    id: 'gemini-3.5-flash',
+    name: 'Gemini 3.5 Flash',
+    desc: 'Baseline speed and foundational performance for routine, high-throughput workloads.',
+    badge: 'Stable'
+  },
+  {
+    id: 'gemini-3.5-flash-lite',
+    name: 'Gemini 3.5 Flash-Lite',
+    desc: 'Fastest, most cost-effective 3.5 model for high-throughput execution.',
+    badge: 'Fast'
+  },
+  {
+    id: 'gemini-3.1-flash-lite',
+    name: 'Gemini 3.1 Flash-Lite',
+    desc: 'Frontier-class performance rivaling larger models at a fraction of the cost.',
+    badge: 'Efficient'
+  },
+  {
+    id: 'gemini-3.1-pro-preview',
+    name: 'Gemini 3.1 Pro',
+    desc: 'Advanced intelligence, complex problem-solving skills, and vibe coding capabilities.',
+    badge: 'Preview'
+  },
+  {
+    id: 'gemini-3-flash-preview',
+    name: 'Gemini 3 Flash Preview',
+    desc: 'Preview model with frontier performance at a fraction of the cost.',
+    badge: 'Preview'
+  },
+  {
+    id: 'gemini-flash-latest',
+    name: 'Gemini Flash Latest',
+    desc: 'Auto-updating pointer alias always running the latest stable Flash release.',
+    badge: 'Auto-Update'
+  }
+];
+
+/**
+ * List of known deprecated/shut-down models to automatically migrate away from.
+ */
+export const DEPRECATED_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-pro',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+  'gemini-1.0-pro'
+];
+
+/**
+ * Sanitizes model ID, automatically replacing deprecated models with Gemini 3.8 Flash.
+ * @param {string} modelId 
+ * @returns {string}
+ */
+export function sanitizeModelId(modelId) {
+  if (!modelId) return 'gemini-3.8-flash';
+  const clean = modelId.trim().replace(/^models\//, '');
+  if (DEPRECATED_MODELS.includes(clean) || clean.startsWith('gemini-1.') || clean.startsWith('gemini-2.')) {
+    return 'gemini-3.8-flash';
+  }
+  return clean;
+}
+
+/**
+ * Dynamically queries Google's Gemini API to fetch currently available models
+ * that support generateContent for the user's API key.
+ * 
+ * @param {string} apiKey 
+ * @returns {Promise<Array<Object>>} List of available models
+ */
+export async function fetchAvailableGeminiModels(apiKey) {
+  if (!apiKey || !apiKey.trim()) {
+    return DEFAULT_GEMINI_MODELS;
+  }
+
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey.trim())}`;
+  const resp = await fetch(endpoint);
+
+  if (!resp.ok) {
+    let errMessage = `HTTP ${resp.status}: ${resp.statusText}`;
+    try {
+      const errJson = await resp.json();
+      if (errJson.error?.message) errMessage = errJson.error.message;
+    } catch {}
+    throw new Error(errMessage);
+  }
+
+  const data = await resp.json();
+  const rawModels = data.models || [];
+
+  // Filter for models supporting content generation
+  const contentModels = rawModels.filter(m => {
+    const methods = m.supportedGenerationMethods || [];
+    return methods.includes('generateContent');
+  });
+
+  if (contentModels.length === 0) {
+    return DEFAULT_GEMINI_MODELS;
+  }
+
+  // Format and prioritize models
+  const parsedModels = contentModels.map(m => {
+    const id = m.name.replace(/^models\//, '');
+    let badge = 'Active';
+    if (id.includes('3.8')) badge = 'New';
+    else if (id.includes('preview')) badge = 'Preview';
+    else if (id.includes('latest')) badge = 'Latest';
+    else if (id.includes('lite')) badge = 'Lite';
+    else if (id.includes('3.7') || id.includes('3.6') || id.includes('3.5')) badge = 'Stable';
+
+    return {
+      id,
+      name: m.displayName || id,
+      desc: m.description || 'Gemini conversational model',
+      badge,
+      inputTokenLimit: m.inputTokenLimit,
+      outputTokenLimit: m.outputTokenLimit,
+      isRecommended: id === 'gemini-3.8-flash' || id === 'gemini-3.6-flash'
+    };
+  });
+
+  // Sort: Recommended first, then Gemini 3 Flash, then other Gemini 3, then rest
+  parsedModels.sort((a, b) => {
+    if (a.id === 'gemini-3.8-flash') return -1;
+    if (b.id === 'gemini-3.8-flash') return 1;
+    if (a.id === 'gemini-3.6-flash') return -1;
+    if (b.id === 'gemini-3.6-flash') return 1;
+    if (a.id === 'gemini-3.7-flash') return -1;
+    if (b.id === 'gemini-3.7-flash') return 1;
+    return a.id.localeCompare(b.id);
+  });
+
+  return parsedModels;
+}
 
 const EMOJI_REGEX = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F1E6}-\u{1F1FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}]/gu;
 
@@ -178,7 +341,7 @@ Output MUST be a valid JSON object with exactly these 3 keys:
 }
 `;
 
-  const effectiveModel = model.trim() || 'gemini-3.8-flash';
+  let effectiveModel = sanitizeModelId(model);
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
 
   const requestBody = {
@@ -198,10 +361,45 @@ Output MUST be a valid JSON object with exactly these 3 keys:
 
   if (!response.ok) {
     let errorDetail = `Status ${response.status}: ${response.statusText}`;
+    let isDeprecated = false;
+    let suggestedModel = 'gemini-3.6-flash';
+
     try {
       const errJson = await response.json();
-      if (errJson.error?.message) errorDetail = errJson.error.message;
+      if (errJson.error?.message) {
+        errorDetail = errJson.error.message;
+        const match = errorDetail.match(/models\/(gemini-[0-9.]+-flash(?:-lite)?)/i);
+        if (match && match[1]) {
+          suggestedModel = match[1];
+        }
+        if (
+          errorDetail.toLowerCase().includes('no longer available') ||
+          errorDetail.toLowerCase().includes('deprecated') ||
+          errorDetail.toLowerCase().includes('not found') ||
+          response.status === 404
+        ) {
+          isDeprecated = true;
+        }
+      }
     } catch {}
+
+    // Auto-migrate to supported model if requested model is deprecated
+    if (isDeprecated && effectiveModel !== suggestedModel) {
+      console.warn(`Model "${effectiveModel}" is deprecated. Auto-upgrading to "${suggestedModel}"...`);
+      try {
+        localStorage.setItem('gemini_model', suggestedModel);
+      } catch {}
+      return generateGeminiReplies({
+        apiKey,
+        model: suggestedModel,
+        chatName,
+        recentMessages,
+        styleProfile,
+        customInstruction,
+        tone
+      });
+    }
+
     throw new Error(`Gemini API error: ${errorDetail}`);
   }
 
@@ -276,7 +474,7 @@ Output format MUST be strictly JSON:
 }
 `;
 
-  const effectiveModel = model.trim() || 'gemini-3.8-flash';
+  let effectiveModel = sanitizeModelId(model);
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
 
   const response = await fetch(endpoint, {
@@ -292,7 +490,43 @@ Output format MUST be strictly JSON:
   });
 
   if (!response.ok) {
-    throw new Error(`Gemini summary error: ${response.statusText}`);
+    let errorDetail = `Status ${response.status}: ${response.statusText}`;
+    let isDeprecated = false;
+    let suggestedModel = 'gemini-3.6-flash';
+
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorDetail = errJson.error.message;
+        const match = errorDetail.match(/models\/(gemini-[0-9.]+-flash(?:-lite)?)/i);
+        if (match && match[1]) {
+          suggestedModel = match[1];
+        }
+        if (
+          errorDetail.toLowerCase().includes('no longer available') ||
+          errorDetail.toLowerCase().includes('deprecated') ||
+          errorDetail.toLowerCase().includes('not found') ||
+          response.status === 404
+        ) {
+          isDeprecated = true;
+        }
+      }
+    } catch {}
+
+    if (isDeprecated && effectiveModel !== suggestedModel) {
+      console.warn(`Model "${effectiveModel}" is deprecated. Auto-upgrading to "${suggestedModel}" for summary...`);
+      try {
+        localStorage.setItem('gemini_model', suggestedModel);
+      } catch {}
+      return generateChatSummary({
+        apiKey,
+        model: suggestedModel,
+        chatName,
+        messages
+      });
+    }
+
+    throw new Error(`Gemini summary error: ${errorDetail}`);
   }
 
   const data = await response.json();

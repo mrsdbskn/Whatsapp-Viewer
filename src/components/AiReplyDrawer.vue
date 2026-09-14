@@ -3,11 +3,12 @@ import { ref, computed, watch } from 'vue';
 import { 
   Sparkles, X, Copy, Check, RefreshCw, Sliders, 
   Send, Bot, BrainCircuit, Key, ArrowRight, Lightbulb, 
-  MessageSquare, FileText, CheckCircle2, Calendar, Target
+  MessageSquare, FileText, CheckCircle2, Calendar, Target, Cpu
 } from 'lucide-vue-next';
 import { 
   analyzeTextingStyle, generateGeminiReplies, 
-  generateOfflineDemoReplies, generateChatSummary 
+  generateOfflineDemoReplies, generateChatSummary,
+  sanitizeModelId
 } from '../utils/gemini.js';
 
 const props = defineProps({
@@ -94,7 +95,7 @@ async function generateReplies() {
     if (props.apiKey && props.apiKey.trim()) {
       const results = await generateGeminiReplies({
         apiKey: props.apiKey,
-        model: props.model,
+        model: sanitizeModelId(props.model),
         chatName: props.thread?.displayName || 'Contact',
         recentMessages: props.recentMessages,
         styleProfile: styleProfile.value,
@@ -126,7 +127,7 @@ async function handleGenerateSummary() {
   try {
     const summary = await generateChatSummary({
       apiKey: props.apiKey,
-      model: props.model,
+      model: sanitizeModelId(props.model),
       chatName: props.thread?.displayName || 'Contact',
       messages: props.recentMessages
     });
@@ -183,9 +184,15 @@ watch(() => props.isOpen, (val) => {
                 <h3 class="text-sm font-semibold text-waText-primary">
                   AI Texting &amp; Summary Suite
                 </h3>
-                <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-ai-violet/20 text-ai-violetLight border border-ai-violet/30 font-semibold">
-                  {{ model }}
-                </span>
+                <button 
+                  type="button"
+                  @click="emit('open-api-modal')"
+                  class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-ai-violet/20 hover:bg-ai-violet/35 text-ai-violetLight border border-ai-violet/30 font-semibold transition-colors flex items-center gap-1 cursor-pointer"
+                  title="Click to change Gemini model"
+                >
+                  <Cpu class="w-3 h-3" />
+                  <span>{{ model }}</span>
+                </button>
                 <span v-if="!apiKey" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-medium">
                   Offline Demo
                 </span>
@@ -198,13 +205,13 @@ watch(() => props.isOpen, (val) => {
 
           <div class="flex items-center gap-2">
             <button
-              v-if="!apiKey"
               type="button"
               @click="emit('open-api-modal')"
               class="text-xs px-2.5 py-1 rounded-lg bg-oled-750 hover:bg-oled-700 text-waText-primary border border-oled-700 transition-colors flex items-center gap-1.5"
+              title="Configure Gemini Model and API key"
             >
               <Key class="w-3.5 h-3.5 text-ai-violet" />
-              <span>Set Gemini Key</span>
+              <span>{{ apiKey ? 'Model & API' : 'Set Gemini Key' }}</span>
             </button>
             <button
               type="button"

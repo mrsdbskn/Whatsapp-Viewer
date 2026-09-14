@@ -5,6 +5,7 @@ import {
   Upload, ArrowLeft, Github, Database, FileText, 
   CheckCircle2, Search, PlusCircle, Download, Layers, X
 } from 'lucide-vue-next';
+import { sanitizeModelId } from './utils/gemini.js';
 import UploadCard from './components/UploadCard.vue';
 import ChatSidebar from './components/ChatSidebar.vue';
 import ChatWindow from './components/ChatWindow.vue';
@@ -64,7 +65,9 @@ const totalMessageCount = computed(() => {
 
 onMounted(() => {
   apiKey.value = localStorage.getItem('gemini_api_key') || '';
-  model.value = localStorage.getItem('gemini_model') || 'gemini-3.8-flash';
+  const storedModel = localStorage.getItem('gemini_model');
+  model.value = sanitizeModelId(storedModel);
+  localStorage.setItem('gemini_model', model.value);
 
   // Listen for PWA install prompt
   window.addEventListener('beforeinstallprompt', (e) => {
